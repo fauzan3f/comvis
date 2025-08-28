@@ -6,7 +6,7 @@ import requests
 import time
 
 # ============== KONFIG ==============
-ESP_IP = "172.20.10.2"
+ESP_IP = "10.254.46.39"
 ROOT_URL = f"http://{ESP_IP}/"
 UNLOCK_URL = f"http://{ESP_IP}/unlock"
 
