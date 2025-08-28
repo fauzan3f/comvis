@@ -13,37 +13,39 @@ ESP_RETRIES = 2
 DATASET_DIR = "dataset"
 ENC_FILE = "encodings.pkl"
 
-# Kamera & performa
-FRAME_W, FRAME_H = 640, 480        # capture native (biar autofocus lebih oke)
-PROCESS_SCALE = 0.5                 # proses di 50% (lebih cepat)
-PROCESS_EVERY_N_FRAMES = 6          # proses tiap N frame
-FPS_TARGET = 24
-LABEL_PERSIST_TIME = 1.0            # detik
+# ========== KONFIGURASI OPTIMAL UNTUK PERFORMA ==========
+# Kamera & performa - OPTIMIZED FOR SMOOTH PERFORMANCE
+FRAME_W, FRAME_H = 320, 240        # Resolusi rendah untuk speed maksimal
+PROCESS_SCALE = 0.5                 # Balance antara speed dan akurasi
+PROCESS_EVERY_N_FRAMES = 2          # Proses setiap 2 frame saja
+FPS_TARGET = 15                     # Target FPS realistis
+LABEL_PERSIST_TIME = 1.5            # Persist label lebih singkat
 
-# Recognition
-UPSAMPLE = 0                        # upsample=0 → cepat
-MATCH_THRESHOLD = 0.5               # threshold jarak
-DEBOUNCE = 5.0                      # detik antar unlock
-REGISTER_SAMPLES = 20            # jumlah foto saat register
+# Recognition - BALANCED SETTINGS
+UPSAMPLE = 0                        # tetap 0 untuk speed
+MATCH_THRESHOLD = 0.6               # Threshold seimbang
+UNKNOWN_THRESHOLD = 0.8             # Threshold untuk unknown
+DEBOUNCE = 2.0                      # Debounce lebih cepat
+REGISTER_SAMPLES = 15               # Kurangi samples untuk training lebih cepat
+MIN_FACE_SIZE = 40                  # Minimum face size
+CONFIDENCE_THRESHOLD = 0.5          # Confidence threshold seimbang
 
-# Update these constants at top of file
-UNLOCK_DURATION = 5.0    # How long door stays unlocked
-LABEL_TIMEOUT = 5.0     # How long labels persist
-PROCESS_EVERY_N = 6      # Process every N frames
+# Timing
+UNLOCK_DURATION = 5.0
+LABEL_TIMEOUT = 2.0                 # Timeout label
+PROCESS_EVERY_N = 2                 # Konsisten dengan PROCESS_EVERY_N_FRAMES
 
 os.makedirs(DATASET_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.secret_key = "face-doorlock-secret"
 
-# ======= STATE =======
+# Global vars
 recognition_thread = None
 recognition_running = False
 recognition_lock = threading.Lock()
 
-# =========================================================
-# Kamera thread (selalu menyediakan frame terbaru → anti-lag)
-# =========================================================
+# ========== CAMERA STREAM OPTIMIZED ==========
 class CameraStream:
     def __init__(self, index_candidates=(0,1)):
         self.cap = None
@@ -55,15 +57,19 @@ class CameraStream:
         if self.cap is None:
             raise RuntimeError("Kamera tidak ditemukan")
 
-        # Kurangi lag buffer
+        # Optimasi kamera untuk performa maksimal - FIXED
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
         self.cap.set(cv2.CAP_PROP_FPS, FPS_TARGET)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer untuk mengurangi lag
+        
+        # Disable auto settings untuk konsistensi
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual exposure
+        
         self.lock = threading.Lock()
         self.frame = None
         self.stopped = False
+        self.frame_count = 0
         self.t = threading.Thread(target=self.update, daemon=True)
         self.t.start()
 
@@ -71,7 +77,10 @@ class CameraStream:
         while not self.stopped:
             ok, f = self.cap.read()
             if not ok:
+                time.sleep(0.01)  # Prevent busy waiting
                 continue
+            
+            # HAPUS frame skipping di sini - biarkan recognition_loop yang handle
             with self.lock:
                 self.frame = f
 
@@ -84,7 +93,7 @@ class CameraStream:
         if self.cap:
             self.cap.release()
 
-# ======= UTIL =======
+# ========== HELPER FUNCTIONS ==========
 def load_encodings():
     if not os.path.exists(ENC_FILE):
         return np.empty((0,128), dtype="float32"), np.array([])
@@ -99,100 +108,149 @@ def save_encodings(encs, names):
         pickle.dump({"encodings": encs, "names": names}, f)
 
 def train_dataset():
-    enc_list, name_list = [], []
-    for user in os.listdir(DATASET_DIR):
-        udir = os.path.join(DATASET_DIR, user)
-        if not os.path.isdir(udir):
+    """Train face encodings dari dataset folder"""
+    all_encodings = []
+    all_names = []
+    
+    for person_name in os.listdir(DATASET_DIR):
+        person_dir = os.path.join(DATASET_DIR, person_name)
+        if not os.path.isdir(person_dir):
             continue
-        for img_name in os.listdir(udir):
-            path = os.path.join(udir, img_name)
-            try:
-                image = face_recognition.load_image_file(path)
-            except Exception:
+            
+        print(f"Training {person_name}...")
+        for img_file in os.listdir(person_dir):
+            if not img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
                 continue
-            boxes = face_recognition.face_locations(image, number_of_times_to_upsample=UPSAMPLE, model="hog")
-            if not boxes:
-                continue
-            encs = face_recognition.face_encodings(image, boxes)
-            if encs:
-                enc_list.append(encs[0])
-                name_list.append(user)
-    encs = np.array(enc_list, dtype="float32") if enc_list else np.empty((0,128), dtype="float32")
-    names = np.array(name_list) if name_list else np.array([])
-    save_encodings(encs, names)
-    return len(encs), set(names.tolist())
+                
+            img_path = os.path.join(person_dir, img_file)
+            img = face_recognition.load_image_file(img_path)
+            encodings = face_recognition.face_encodings(img)
+            
+            if encodings:
+                all_encodings.append(encodings[0])
+                all_names.append(person_name)
+    
+    if all_encodings:
+        save_encodings(all_encodings, all_names)
+        print(f"Training selesai: {len(all_encodings)} encodings untuk {len(set(all_names))} orang")
+        return True
+    return False
 
 def register_user(username, samples=REGISTER_SAMPLES):
+    """Register user baru dengan mengambil foto dari kamera"""
     user_dir = os.path.join(DATASET_DIR, username)
     os.makedirs(user_dir, exist_ok=True)
-
-    # pakai kamera terbaik yang ketemu
-    cam = None
+    
     try:
-        cam = CameraStream(index_candidates=(0,1))
-    except RuntimeError:
-        return 0, 0, set()
-
-    saved = 0
-    while saved < samples:
+        cam = CameraStream()
+    except RuntimeError as e:
+        return False, str(e)
+    
+    count = 0
+    while count < samples:
         frame = cam.read()
         if frame is None:
             continue
-
-        preview = frame.copy()
-        h, w = preview.shape[:2]
-        cv2.putText(preview, f"Posisikan wajah | Foto {saved+1}/{samples}",
-                    (10, h-12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-        cv2.imshow("Register - Tekan 's' untuk foto, 'q' batal", preview)
+            
+        cv2.putText(frame, f"Foto {count+1}/{samples} - Tekan SPACE", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+        cv2.imshow("Register User", frame)
+        
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('s'):
-            fname = os.path.join(user_dir, f"{username}_{int(time.time()*1000)}.jpg")
-            cv2.imwrite(fname, frame)
-            saved += 1
+        if key == ord(' '):
+            timestamp = int(time.time() * 1000)
+            filename = f"{username}_{timestamp}.jpg"
+            filepath = os.path.join(user_dir, filename)
+            cv2.imwrite(filepath, frame)
+            count += 1
+            print(f"Saved: {filename}")
         elif key == ord('q'):
             break
-
+    
     cam.stop()
     cv2.destroyAllWindows()
-    total, users = train_dataset()  # auto-train
-    return saved, total, users
+    return count == samples, f"Berhasil mengambil {count} foto"
 
 def distance_to_confidence(dist, match_threshold=MATCH_THRESHOLD, max_dist=0.6):
-    """
-    Map jarak (semakin kecil semakin mirip) → ~confidence 0..1.
-    Linear mapping mulai 100% di threshold, turun ke 0% di max_dist.
-    """
-    if dist <= match_threshold:
-        return 1.0
-    if dist >= max_dist:
+    """Convert face distance to confidence percentage"""
+    if dist > max_dist:
         return 0.0
-    # skala linear
-    return float(1.0 - (dist - match_threshold) / (max_dist - match_threshold))
+    elif dist < match_threshold:
+        return (max_dist - dist) / max_dist
+    else:
+        return 0.0
 
 def esp_unlock_async():
-    # panggil unlock di thread terpisah → tidak blokir loop kamera
     threading.Thread(target=esp_unlock, daemon=True).start()
 
 def esp_unlock():
+    """Kirim perintah unlock ke ESP32"""
     for attempt in range(ESP_RETRIES):
         try:
-            r = requests.get(UNLOCK_URL, timeout=ESP_TIMEOUT)
-            if r.status_code == 200:
-                print("[ESP] Unlock OK")
+            response = requests.get(UNLOCK_URL, timeout=ESP_TIMEOUT)
+            if response.status_code == 200:
+                print(f"ESP unlock berhasil (attempt {attempt+1})")
                 return True
-            print(f"[ESP] HTTP {r.status_code}")
-        except requests.exceptions.Timeout:
-            print("[ESP] timeout")
-        except Exception as e:
-            print("[ESP] err:", e)
-        time.sleep(0.3)
+        except requests.exceptions.RequestException as e:
+            print(f"ESP unlock gagal (attempt {attempt+1}): {e}")
+            if attempt < ESP_RETRIES - 1:
+                time.sleep(0.5)
     return False
 
-# ======= LOOP RECOGNITION =======
+def draw_face_label(frame, name, left, top, right, bottom, confidence=0.0):
+    """Helper function to draw consistent face labels with confidence - FIXED"""
+    # Pastikan koordinat dalam batas frame
+    h, w = frame.shape[:2]
+    left = max(0, left)
+    top = max(0, top)
+    right = min(w, right)
+    bottom = min(h, bottom)
+    
+    # Warna berdasarkan status dan confidence
+    if name == "Unknown":
+        color = (0, 0, 255)  # Merah untuk unknown
+        label_text = "UNKNOWN"
+    else:
+        # Hijau untuk dikenal, intensitas berdasarkan confidence
+        green_intensity = int(255 * min(confidence, 1.0))
+        color = (0, green_intensity, 0)
+        label_text = f"{name} ({confidence:.2f})"
+    
+    # Draw rectangle around face - FIXED: gunakan koordinat yang benar
+    cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+    
+    # Draw label background - FIXED: posisi yang lebih aman
+    label_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+    label_y = max(35, top)  # Pastikan tidak keluar dari frame atas
+    
+    cv2.rectangle(frame,
+                 (left, label_y - 35),
+                 (left + label_size[0] + 10, label_y),
+                 color, -1)
+    
+    # Draw name with confidence - FIXED: posisi yang tepat
+    cv2.putText(frame, label_text,
+                (left + 5, label_y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+def draw_status_banner(frame, status):
+    """Helper function to draw status banner"""
+    cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (30,30,30), -1)
+    color = (0,255,0) if status == "UNLOCKED" else (0,0,255)
+    
+    # Tambahkan timestamp
+    timestamp = time.strftime("%H:%M:%S")
+    status_text = f"Door: {status} | {timestamp}"
+    
+    cv2.putText(frame, status_text, (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+# ========== RECOGNITION LOOP - PINDAHKAN KE SINI ==========
 def recognition_loop():
     global recognition_running
 
     encs, names = load_encodings()
+    print(f"Loaded {len(encs)} encodings for names: {names}")
     if len(encs) == 0:
         print("No encodings found. Silakan train dulu.")
         return
@@ -209,11 +267,16 @@ def recognition_loop():
     unlock_end_time = 0
     door_status = "LOCKED"
     face_labels = {}  # Store persistent labels
+    
+    # Tambahkan FPS counter untuk monitoring
+    fps_counter = 0
+    fps_start_time = time.time()
 
     try:
         while recognition_running:
             frame = cam.read()
             if frame is None:
+                time.sleep(0.01)
                 continue
 
             current_time = time.time()
@@ -228,85 +291,115 @@ def recognition_loop():
                          if current_time - v['last_seen'] < LABEL_TIMEOUT}
 
             frame_count += 1
-            if frame_count % PROCESS_EVERY_N != 0:
-                # Draw existing labels even when skipping processing
-                for face_info in face_labels.values():
-                    left, top = face_info['pos']
-                    name = face_info['name']
-                    draw_face_label(frame, name, left, top)
-
-                draw_status_banner(frame, door_status)
-                cv2.imshow("Face Recognition", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                continue
-
-            # Face detection and recognition
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            boxes = face_recognition.face_locations(rgb, model="hog")
-            enc_curr = face_recognition.face_encodings(rgb, boxes)
-
-            for (top, right, bottom, left), e in zip(boxes, enc_curr):
-                dists = face_recognition.face_distance(encs, e)
-                if len(dists) > 0:
-                    idx = np.argmin(dists)
-                    min_dist = dists[idx]
-                    detected_name = names[idx] if min_dist <= MATCH_THRESHOLD else "Unknown"
-                    
-                    # Update face label
-                    face_key = f"{left}_{top}"
-                    face_labels[face_key] = {
-                        'name': detected_name,
-                        'pos': (left, top),
-                        'last_seen': current_time
-                    }
-
-                    # Handle unlock
-                    if detected_name != "Unknown" and door_status == "LOCKED":
-                        if esp_unlock():
-                            door_status = "UNLOCKED"
-                            unlock_end_time = current_time + UNLOCK_DURATION
-                            print(f"Door unlocked for {detected_name}")
-
-            # Draw all current labels
+            
+            # ALWAYS draw existing labels first - FIXED
             for face_info in face_labels.values():
-                left, top = face_info['pos']
+                left, top, right, bottom = face_info['bbox']
                 name = face_info['name']
-                draw_face_label(frame, name, left, top)
+                confidence = face_info.get('confidence', 0)
+                draw_face_label(frame, name, left, top, right, bottom, confidence)
+            
+            # OPTIMIZED: Proses face recognition hanya setiap N frame
+            if frame_count % PROCESS_EVERY_N == 0:
+                # Resize frame untuk processing yang lebih cepat
+                small_frame = cv2.resize(frame, (0, 0), fx=PROCESS_SCALE, fy=PROCESS_SCALE)
+                rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
+                # Face detection dengan model HOG (lebih cepat)
+                face_locations = face_recognition.face_locations(rgb_small_frame, 
+                                                               number_of_times_to_upsample=UPSAMPLE,
+                                                               model="hog")
+                
+                print(f"Found {len(face_locations)} faces")  # Debug
+                
+                # Filter faces berdasarkan ukuran minimum
+                valid_boxes = []
+                for (top, right, bottom, left) in face_locations:
+                    # Scale back ke ukuran asli
+                    top = int(top / PROCESS_SCALE)
+                    right = int(right / PROCESS_SCALE)
+                    bottom = int(bottom / PROCESS_SCALE)
+                    left = int(left / PROCESS_SCALE)
+                    
+                    # Check minimum face size
+                    face_width = right - left
+                    face_height = bottom - top
+                    print(f"Face size: {face_width}x{face_height}")  # Debug
+                    
+                    if face_width >= MIN_FACE_SIZE and face_height >= MIN_FACE_SIZE:
+                        valid_boxes.append((top, right, bottom, left))
+                        print(f"Valid face at: ({left}, {top}, {right}, {bottom})")  # Debug
+
+                if len(valid_boxes) > 0:
+                    # Encode faces yang valid saja
+                    face_encodings = face_recognition.face_encodings(rgb_small_frame, 
+                        [(int(t*PROCESS_SCALE), int(r*PROCESS_SCALE), int(b*PROCESS_SCALE), int(l*PROCESS_SCALE)) 
+                         for t,r,b,l in valid_boxes])
+
+                    for i, face_encoding in enumerate(face_encodings):
+                        top, right, bottom, left = valid_boxes[i]
+                        
+                        name = "Unknown"
+                        confidence = 0.0
+                        
+                        if len(encs) > 0:
+                            # Calculate distances
+                            face_distances = face_recognition.face_distance(encs, face_encoding)
+                            min_distance = np.min(face_distances)
+                            confidence = distance_to_confidence(min_distance)
+                            
+                            # Debug output
+                            print(f"Face distances: {face_distances}")
+                            print(f"Min distance: {min_distance:.3f}, Confidence: {confidence:.3f}")
+                            
+                            if min_distance <= MATCH_THRESHOLD and confidence >= CONFIDENCE_THRESHOLD:
+                                best_match_index = np.argmin(face_distances)
+                                name = names[best_match_index]
+                                print(f"RECOGNIZED: {name} with confidence {confidence:.3f}")
+                                
+                                # Unlock logic dengan debounce
+                                if current_time - last_unlock > DEBOUNCE:
+                                    if door_status == "LOCKED":
+                                        print(f"Attempting to unlock for {name}")
+                                        if esp_unlock():
+                                            door_status = "UNLOCKED"
+                                            unlock_end_time = current_time + UNLOCK_DURATION
+                                            last_unlock = current_time
+                                            print(f"Door unlocked for {name}")
+                            else:
+                                print(f"UNKNOWN: confidence {confidence:.3f} < threshold {CONFIDENCE_THRESHOLD}")
+                        
+                        # Store face info untuk persistent labeling - FIXED
+                        face_key = f"{left}_{top}_{frame_count}"
+                        face_labels[face_key] = {
+                            'name': name,
+                            'bbox': (left, top, right, bottom),  # FIXED: include right, bottom
+                            'confidence': confidence,
+                            'last_seen': current_time
+                        }
+                        
+                        print(f"Stored label: {name} at ({left}, {top}, {right}, {bottom})")  # Debug
+                else:
+                    print("No valid faces found")  # Debug
+
+            # Draw status banner
             draw_status_banner(frame, door_status)
+            
+            # Show frame
             cv2.imshow("Face Recognition", frame)
+            
+            # Kurangi delay untuk responsivitas
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
     except Exception as e:
-        print("Error in recognition loop:", e)
+        print(f"Error in recognition loop: {e}")
+        import traceback
+        traceback.print_exc()  # Print full error untuk debugging
     finally:
         cam.stop()
         cv2.destroyAllWindows()
-
-def draw_face_label(frame, name, left, top):
-    """Helper function to draw consistent face labels"""
-    color = (0,255,0) if name != "Unknown" else (0,0,255)
-    
-    # Draw label background
-    label_size = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-    cv2.rectangle(frame,
-                 (left, top - 30),
-                 (left + label_size[0] + 10, top),
-                 color, -1)
-    
-    # Draw name
-    cv2.putText(frame, name,
-                (left + 5, top - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-
-def draw_status_banner(frame, status):
-    """Helper function to draw status banner"""
-    cv2.rectangle(frame, (0,0), (frame.shape[1], 35), (30,30,30), -1)
-    color = (0,255,0) if status == "UNLOCKED" else (0,0,255)
-    cv2.putText(frame, f"Door: {status}", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        print("Recognition stopped")
 
 # ================== ROUTES ==================
 @app.route("/")
@@ -320,27 +413,29 @@ def register():
     if not username:
         flash("Nama user tidak boleh kosong.", "error")
         return redirect(url_for("index"))
-
-    saved, total, users = register_user(username)
-    if saved == 0:
-        flash("Registrasi dibatalkan atau kamera gagal.", "error")
-    else:
-        flash(f"Registrasi {username}: tersimpan {saved} foto. Training selesai. Total embedding: {total}.", "success")
+    
+    try:
+        register_user(username)
+        flash(f"User {username} berhasil diregistrasi.", "success")
+    except Exception as e:
+        flash(f"Error: {e}", "error")
+    
     return redirect(url_for("index"))
 
 @app.route("/train", methods=["POST"])
 def train():
-    total, users = train_dataset()
-    flash(f"Training selesai. Total embedding: {total}. Users: {', '.join(users) if users else '-'}", "success")
+    train_dataset()
+    flash("Training completed", "success")
     return redirect(url_for("index"))
 
 @app.route("/start", methods=["POST"])
 def start():
     global recognition_thread, recognition_running
-    if recognition_thread and recognition_thread.is_alive():
-        flash("Recognition sudah berjalan", "info")
+    
+    if recognition_running:
+        flash("Recognition sudah berjalan", "warning")
         return redirect(url_for("index"))
-
+    
     with recognition_lock:
         recognition_running = True
 
@@ -352,23 +447,20 @@ def start():
 
 @app.route("/stop", methods=["POST"])
 def stop():
-    global recognition_running, recognition_thread
+    global recognition_running
+    
     with recognition_lock:
         recognition_running = False
-    if recognition_thread:
-        recognition_thread.join(timeout=3.0)
-        recognition_thread = None
-    flash("Recognition stopped", "info")
+    
+    flash("Recognition stopped", "success")
     return redirect(url_for("index"))
 
 @app.route("/unlock", methods=["GET"])
 def unlock():
-    if esp_unlock():
-        return jsonify({"status": "success", "message": "Door unlocked"})
-    return jsonify({"status": "error", "message": "Failed to unlock"}), 500
+    esp_unlock_async()
+    return jsonify({"status": "unlock_sent"})
 
 if __name__ == "__main__":
-    # (opsional) kurangi thread internal OpenCV kalau perlu:
     try:
         cv2.setNumThreads(1)
     except Exception:
