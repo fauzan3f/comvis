@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <title>Face Door Lock</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { font-family: ui-sans-serif, system-ui, Arial; }
+      body { margin: 0; background: #0b0f19; color: #e5e7eb; }
+      .container { max-width: 880px; margin: 40px auto; padding: 0 16px; }
+      .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 20px; }
+      h1 { margin: 0 0 14px; font-size: 24px; }
+      form { display: inline-block; margin-right: 10px; }
+      input[type="text"] { padding: 10px 12px; border-radius: 10px; border: 1px solid #374151; background: #0b1220; color: #e5e7eb; }
+      button { padding: 10px 14px; border-radius: 10px; border: 1px solid #374151; background: #111c2e; color: #dbeafe; cursor: pointer; }
+      button:hover { background: #0e1626; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+      .badge { display: inline-block; padding: 6px 10px; border-radius: 999px; background: #0e2a47; color: #93c5fd; border: 1px solid #1f3b66; margin-right: 6px; }
+      .flash { margin: 8px 0; padding: 10px 12px; border-radius: 10px; }
+      .success { background: #052e1a; color: #8ff0b3; border: 1px solid #115e32;}
+      .error { background: #3b0b0b; color: #ffb4b4; border: 1px solid #7a1f1f;}
+      .info { background: #0b1f3b; color: #b8d2ff; border: 1px solid #1e3a8a;}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>🔐 Face Door Lock – Simple Web</h1>
+
+        <!-- Flash messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, message in messages %}
+              <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <!-- Register (auto-train) -->
+        <h3>1) Register User (otomatis Train)</h3>
+        <form method="POST" action="/register">
+          <input type="text" name="username" placeholder="Nama user" required />
+          <button type="submit">📸 Register & Train</button>
+        </form>
+
+        <!-- Train ulang -->
+        <h3 style="margin-top:18px;">2) Train Ulang</h3>
+        <form method="POST" action="/train">
+          <button type="submit">🏋️ Train Dataset</button>
+        </form>
+
+        <!-- Start/Stop unlock -->
+        <h3 style="margin-top:18px;">3) Realtime Unlock</h3>
+        <div class="row">
+          <form method="POST" action="/start">
+            <button type="submit">▶️ Start Unlock</button>
+          </form>
+          <form method="POST" action="/stop">
+            <button type="submit">⏹ Stop Unlock</button>
+          </form>
+        </div>
+
+        <div style="margin-top:18px;">
+          <small>Catatan: saat <b>Start Unlock</b>, akan muncul jendela kamera (desktop). Tutup dengan tombol <b>Stop</b> atau tekan <b>Q</b> di jendela kamera.</small>
+        </div>
+
+        <!-- Users terdaftar -->
+        <h3 style="margin-top:18px;">User Terdaftar</h3>
+        {% if users and users|length > 0 %}
+          {% for u in users %}
+            <span class="badge">{{ u }}</span>
+          {% endfor %}
+        {% else %}
+          <small>Belum ada user. Lakukan Register dulu.</small>
+        {% endif %}
+      </div>
+    </div>
+  </body>
+</html>
