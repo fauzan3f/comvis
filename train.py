@@ -1,45 +1,72 @@
 import os
+import cv2
 import pickle
 import face_recognition
+import numpy as np
 
 DATASET_DIR = "dataset"
 ENC_FILE = "encodings.pkl"
 
-known_encodings, known_names = [], []
+def train_dataset():
+    print("[INFO] Starting face training...")
+    known_encodings = []
+    known_names = []
 
-print("[INFO] Training data wajah...")
-for user in os.listdir(DATASET_DIR):
-    user_dir = os.path.join(DATASET_DIR, user)
-    if not os.path.isdir(user_dir):
-        continue
+    # Check if dataset directory exists
+    if not os.path.exists(DATASET_DIR):
+        print("[ERROR] Dataset directory not found")
+        return False
 
-    for img_name in os.listdir(user_dir):
-        img_path = os.path.join(user_dir, img_name)
-        try:
-            image = face_recognition.load_image_file(img_path)
-        except Exception as e:
-            print(f"[SKIP] gagal load {img_name}: {e}")
+    # Process each user directory
+    for user in os.listdir(DATASET_DIR):
+        user_dir = os.path.join(DATASET_DIR, user)
+        if not os.path.isdir(user_dir):
             continue
 
-        # deteksi wajah (lebih sensitif sedikit)
-        boxes = face_recognition.face_locations(
-            image, number_of_times_to_upsample=1, model="hog"
-        )
-        if not boxes:
-            print(f"[SKIP] no face: {img_name}")
-            continue
+        print(f"[INFO] Processing user {user}...")
+        
+        # Process each image
+        for img_name in os.listdir(user_dir):
+            if not img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                continue
 
-        encs = face_recognition.face_encodings(image, boxes)
-        if not encs:
-            print(f"[SKIP] no encoding: {img_name}")
-            continue
+            img_path = os.path.join(user_dir, img_name)
+            print(f"[INFO] Processing {img_path}")
 
-        known_encodings.append(encs[0])
-        known_names.append(user)
-        print(f"[OK] {user} <- {img_name}")
+            try:
+                # Load and encode face
+                image = face_recognition.load_image_file(img_path)
+                boxes = face_recognition.face_locations(image, model="hog")
 
-data = {"encodings": known_encodings, "names": known_names}
-with open(ENC_FILE, "wb") as f:
-    pickle.dump(data, f)
+                if not boxes:
+                    print(f"[WARN] No face found in {img_name}")
+                    continue
 
-print(f"[DONE] {len(known_encodings)} embeddings disimpan ke {ENC_FILE}")
+                # Get face encodings
+                encodings = face_recognition.face_encodings(image, boxes)
+                
+                if encodings:
+                    known_encodings.append(encodings[0])
+                    known_names.append(user)
+                    print(f"[OK] Encoded {user}/{img_name}")
+
+            except Exception as e:
+                print(f"[ERROR] Failed to process {img_name}: {str(e)}")
+
+    # Save results if we found any faces
+    if known_encodings:
+        data = {
+            "encodings": known_encodings,
+            "names": known_names
+        }
+        with open(ENC_FILE, "wb") as f:
+            pickle.dump(data, f)
+        
+        print(f"[SUCCESS] Saved {len(known_encodings)} encodings to {ENC_FILE}")
+        return True
+    else:
+        print("[ERROR] No faces were encoded")
+        return False
+
+if __name__ == "__main__":
+    train_dataset()
