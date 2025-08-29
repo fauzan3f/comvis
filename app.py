@@ -31,15 +31,11 @@ MIN_FACE_SIZE = 40                  # Minimum face size
 CONFIDENCE_THRESHOLD = 0.3          # Lower confidence threshold
 
 # Timing
-UNLOCK_DURATION = 3.0
+UNLOCK_DURATION = 5.0
 LABEL_TIMEOUT = 2.0                 # Timeout label
 PROCESS_EVERY_N = 2                 # Konsisten dengan PROCESS_EVERY_N_FRAMES
 SHOW_LABEL_DURATION = 3.0           # Show user label for 3 seconds after recognition
 STOP_CAMERA_AFTER_UNLOCK = True     # Stop camera after successful unlock
-
-# Add these constants at the top
-UNKNOWN_LABEL_DURATION = 1.0  # Duration in seconds for Unknown label
-UNKNOWN_CONFIDENCE_THRESHOLD = 0.3  # Threshold for unknown detection
 
 os.makedirs(DATASET_DIR, exist_ok=True)
 
@@ -263,7 +259,7 @@ def draw_user_label(frame, username, unlock_time_remaining=0):
     """Draw user label with unlock countdown"""
     h = frame.shape[0]
     if unlock_time_remaining > 0:
-        text = f"WELCOME {username.upper()}! Unlocking....... )"
+        text = f"WELCOME {username.upper()}! Unlocking.......)"
         color = (0, 255, 0)  # Green
     else:
         text = f"Welcome back, {username}!"
@@ -306,10 +302,6 @@ def recognition_loop():
     camera_stop_time = 0
     unlock_in_progress = False
     
-    # Add these variables inside the function
-    unknown_faces = {}  # Store unknown face locations and their timestamps
-    current_time = time.time()
-    
     try:
         while recognition_running:
             frame = cam.read()
@@ -334,10 +326,6 @@ def recognition_loop():
             # Process face detection every N frames
             frame_count += 1
             if frame_count % PROCESS_EVERY_N == 0 and not unlock_in_progress:
-                # Clean old unknown faces first
-                unknown_faces = {k:v for k,v in unknown_faces.items() 
-                               if current_time - v['timestamp'] < UNKNOWN_LABEL_DURATION}
-
                 # Detect faces
                 small_frame = cv2.resize(frame, (0, 0), fx=PROCESS_SCALE, fy=PROCESS_SCALE)
                 rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
@@ -355,53 +343,61 @@ def recognition_loop():
                     # Get face encoding
                     face_encoding = face_recognition.face_encodings(frame, [(top, right, bottom, left)])
                     if not face_encoding:
-                        # Add to unknown faces with timestamp
-                        face_key = f"{left}_{top}"
-                        unknown_faces[face_key] = {
-                            'box': (left, top, right, bottom),
-                            'timestamp': current_time
-                        }
+                        # Draw unknown if no encoding
+                        draw_face_label(display_frame, "Unknown", left, top, right, bottom, 0)
                         continue
                     
                     face_encoding = face_encoding[0]
-                    min_distance = float('inf')  # Initialize default distance
                     
                     if len(encs) > 0:
                         face_distances = face_recognition.face_distance(encs, face_encoding)
                         min_distance = np.min(face_distances)
                         confidence = distance_to_confidence(min_distance)
                         
+                        print(f"Face detected - Distance: {min_distance:.3f}, Confidence: {confidence:.3f}")
+                        
                         if min_distance <= MATCH_THRESHOLD:
-                            # Known face detected
                             best_match_index = np.argmin(face_distances)
                             name = names[best_match_index]
                             
-                            # Handle unlock process
-                            if not unlock_in_progress and (current_time - last_unlock) >= DEBOUNCE:
-                                if esp_unlock():
-                                    door_status = "UNLOCKED"
-                                    recognized_user = name
-                                    show_label_until = current_time + SHOW_LABEL_DURATION
-                                    unlock_end_time = current_time + UNLOCK_DURATION
-                                    last_unlock = current_time
-                                    unlock_in_progress = True
-                                    print(f"Door unlocked for {name}")
+                            print(f"RECOGNIZED: {name} (distance: {min_distance:.3f}, confidence: {confidence:.3f})")
                             
-                            # Draw recognized face label
+                            # IMMEDIATE LABEL AND UNLOCK
                             draw_face_label(display_frame, name, left, top, right, bottom, confidence)
+                            
+                            # Handle unlock (with debounce)
+                            if current_time - last_unlock > DEBOUNCE:
+                                print(f"UNLOCKING for {name}...")
+                                
+                                # Set unlock state IMMEDIATELY
+                                door_status = "UNLOCKED"
+                                unlock_end_time = current_time + UNLOCK_DURATION
+                                last_unlock = current_time
+                                unlock_in_progress = True
+                                
+                                # Set recognition display state
+                                recognized_user = name
+                                show_label_until = current_time + SHOW_LABEL_DURATION
+                                
+                                # Set camera stop time if enabled
+                                if STOP_CAMERA_AFTER_UNLOCK:
+                                    camera_stop_time = current_time + SHOW_LABEL_DURATION
+                                
+                                # Send unlock command async (don't wait)
+                                esp_unlock_async()
+                                
+                                print(f"Door status changed to UNLOCKED for {name}")
+                                
+                                # Break from face processing loop
+                                break
                         else:
-                            # Unknown face detected
-                            face_key = f"{left}_{top}"
-                            unknown_faces[face_key] = {
-                                'box': (left, top, right, bottom),
-                                'timestamp': current_time
-                            }
-
-            # Draw all unknown faces
-            for face_info in unknown_faces.values():
-                left, top, right, bottom = face_info['box']
-                draw_face_label(display_frame, "Unknown", left, top, right, bottom, 0)
-
+                            # Unknown face
+                            draw_face_label(display_frame, "Unknown", left, top, right, bottom, 0)
+                            print(f"Unknown face - Distance: {min_distance:.3f}")
+                    else:
+                        # No encodings loaded
+                        draw_face_label(display_frame, "No Data", left, top, right, bottom, 0)
+            
             # Always draw status banner
             draw_status_banner(display_frame, door_status)
             
